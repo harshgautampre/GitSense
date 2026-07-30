@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Luma Finance Dashboard",
-  description: "A modern personal finance dashboard.",
+  title: "GitSense AI",
+  description: "AI-powered GitHub repository analysis.",
 };
 
 export default function RootLayout({

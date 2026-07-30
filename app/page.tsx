@@ -1,6 +1,6 @@
-import { FinanceDashboard } from "@/components/FinanceDashboard";
-import { financeDashboardData } from "@/lib/dashboard-data";
+import { RepositoryDashboard } from "@/components/RepositoryDashboard";
+import { repositoryDashboardData } from "@/lib/dashboard-data";
 
 export default function Home() {
-  return <FinanceDashboard data={financeDashboardData} />;
+  return <RepositoryDashboard data={repositoryDashboardData} />;
 }
