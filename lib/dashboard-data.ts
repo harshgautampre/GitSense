@@ -104,16 +104,37 @@ export interface DashboardCopy {
 }
 
 export interface RepositoryAnalysisResponse {
-  repo_name: string;
-  health_score: number;
-  total_commits: number;
-  recent_alerts: string[];
-  commit_history: Array<{
-    month: string;
+  repoDetails: {
+    name: string;
+    fullName: string;
+    description: string | null;
+    url: string;
+    defaultBranch: string;
+    openIssues: number;
+    stars: number;
+    forks: number;
+    updatedAt: string;
+  };
+  commits: Array<{
+    sha: string;
+    message: string;
+    author: string;
+    date: string;
+    url: string;
     additions: number;
     deletions: number;
-    commits: number;
+    files: Array<{
+      path: string;
+      status: string;
+      additions: number;
+      deletions: number;
+      changes: number;
+    }>;
   }>;
+  latestFiles: Array<{ path: string; sha: string; size: number | null }>;
+  aiHealthScore: number;
+  aiAlerts: string[];
+  treeTruncated: boolean;
 }
 
 export interface RepositoryDashboardData {
@@ -156,10 +177,8 @@ export const repositoryDashboardData: RepositoryDashboardData = {
   navigation: [
     { id: "overview", label: "Dashboard", icon: "grid", active: true },
     { id: "activity", label: "Activity", icon: "chart" },
-    { id: "repositories", label: "Repositories", icon: "repository" },
-    { id: "branches", label: "Branches", icon: "branch" },
     { id: "commits", label: "Commits", icon: "commit" },
-    { id: "settings", label: "Settings", icon: "settings" },
+    { id: "alerts", label: "Alerts", icon: "shield" },
   ],
   actionIcons: [
     { label: "Search repositories", icon: "search" },
