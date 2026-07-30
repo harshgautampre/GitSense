@@ -3,10 +3,6 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-interface AnalyzeRepositoryRequest {
-  repositoryUrl: string;
-}
-
 interface GitHubRepository {
   name: string;
   full_name: string;
@@ -25,6 +21,7 @@ interface GitHubCommit {
   commit: {
     message: string;
     author: { name: string; date: string };
+    tree?: { sha: string };
   };
 }
 
@@ -42,12 +39,7 @@ interface GitHubCommitDetails extends GitHubCommit {
 
 interface GitHubTree {
   truncated: boolean;
-  tree: Array<{
-    path: string;
-    type: "blob" | "tree" | "commit";
-    sha: string;
-    size?: number;
-  }>;
+  tree: Array<{ path: string; type: "blob" | "tree" | "commit"; sha: string; size?: number }>;
 }
 
 interface GeminiAnalysis {
@@ -55,37 +47,26 @@ interface GeminiAnalysis {
   alerts: string[];
 }
 
-class GitHubApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message);
-    this.name = "GitHubApiError";
-  }
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unknown error occurred";
 }
 
 function parseRepositoryUrl(repositoryUrl: string) {
-  let parsedUrl: URL;
-  try {
-    parsedUrl = new URL(repositoryUrl);
-  } catch {
-    throw new GitHubApiError("Provide a valid GitHub repository URL.", 400);
+  const parsed = new URL(repositoryUrl);
+  if (parsed.protocol !== "https:" || !["github.com", "www.github.com"].includes(parsed.hostname)) {
+    throw new Error("repositoryUrl must be a GitHub HTTPS URL.");
   }
 
-  if (parsedUrl.protocol !== "https:" || !["github.com", "www.github.com"].includes(parsedUrl.hostname)) {
-    throw new GitHubApiError("The repository URL must point to github.com.", 400);
-  }
-
-  const segments = parsedUrl.pathname.split("/").filter(Boolean);
+  const segments = parsed.pathname.split("/").filter(Boolean);
   if (segments.length !== 2) {
-    throw new GitHubApiError("Use a repository URL in the form https://github.com/owner/repository.", 400);
+    throw new Error("Use a repository URL in the form https://github.com/owner/repository.");
   }
 
-  const [owner, rawRepository] = segments;
-  const repo = rawRepository.replace(/\.git$/, "");
-  if (!owner || !repo) {
-    throw new GitHubApiError("The GitHub repository URL is incomplete.", 400);
-  }
+  const [owner, repositorySegment] = segments;
+  const repo = repositorySegment.replace(/\.git$/, "");
+  if (!owner || !repo) throw new Error("The repository URL is incomplete.");
 
-  return { owner, repo };
+  return { owner: encodeURIComponent(owner), repo: encodeURIComponent(repo) };
 }
 
 async function githubFetch<T>(path: string, token: string): Promise<T> {
@@ -98,30 +79,12 @@ async function githubFetch<T>(path: string, token: string): Promise<T> {
     cache: "no-store",
   });
 
-  if (response.status === 404) {
-    throw new GitHubApiError("Repository not found or not accessible with this GitHub token.", 404);
-  }
-
-  if (response.status === 403 || response.status === 429) {
-    const reset = response.headers.get("x-ratelimit-reset");
-    const retryMessage = reset
-      ? ` Try again after ${new Date(Number(reset) * 1000).toISOString()}.`
-      : "";
-    throw new GitHubApiError(`GitHub API rate limit exceeded.${retryMessage}`, 429);
-  }
-
   if (!response.ok) {
-    throw new GitHubApiError(`GitHub API request failed with status ${response.status}.`, response.status);
+    const details = await response.text();
+    throw new Error(`GitHub API request failed (${response.status}): ${details || response.statusText}`);
   }
 
   return response.json() as Promise<T>;
-}
-
-function buildCommitContext(commits: GitHubCommit[]) {
-  return commits
-    .map((commit) => `${commit.sha.slice(0, 7)} | ${commit.commit.author.date} | ${commit.commit.message.slice(0, 500)}`)
-    .join("\n")
-    .slice(0, 12000);
 }
 
 function isGeminiAnalysis(value: unknown): value is GeminiAnalysis {
@@ -134,95 +97,95 @@ function isGeminiAnalysis(value: unknown): value is GeminiAnalysis {
   );
 }
 
-async function analyzeCommitMessages(commitContext: string, apiKey: string): Promise<GeminiAnalysis> {
-  const client = new GoogleGenAI({ apiKey });
-  const response = await client.models.generateContent({
-    model: "gemini-1.5-flash",
-    contents: `Recent commit messages:\n${commitContext}`,
-    config: {
-      systemInstruction: "You are a senior software engineer reviewing repository health from recent commit messages. Estimate a repository health score from 0 to 100 and identify exactly three concise, credible potential security or performance alerts. Do not claim certainty where commit messages lack evidence.",
-      responseMimeType: "application/json",
-      responseJsonSchema: {
-        type: "object",
-        additionalProperties: false,
-        required: ["healthScore", "alerts"],
-        properties: {
-          healthScore: { type: "number", minimum: 0, maximum: 100 },
-          alerts: {
-            type: "array",
-            minItems: 3,
-            maxItems: 3,
-            items: { type: "string" },
-          },
-        },
-      },
-    },
-  });
-
-  const text = response.text;
-  if (!text) throw new Error("Gemini returned an empty analysis.");
-
-  const parsed: unknown = JSON.parse(text);
-  if (!isGeminiAnalysis(parsed)) throw new Error("Gemini returned an invalid analysis format.");
-
-  return {
-    healthScore: Math.max(0, Math.min(100, Math.round(parsed.healthScore))),
-    alerts: parsed.alerts.slice(0, 3),
-  };
-}
-
 export async function POST(request: Request) {
   try {
     const githubToken = process.env.GITHUB_TOKEN;
     const geminiApiKey = process.env.GEMINI_API_KEY;
-    if (!githubToken || !geminiApiKey) {
-      throw new Error("The server requires GITHUB_TOKEN and GEMINI_API_KEY configuration.");
-    }
+    if (!githubToken) throw new Error("GITHUB_TOKEN is not configured.");
+    if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured.");
 
-    const body = (await request.json()) as AnalyzeRepositoryRequest;
-    if (!body.repositoryUrl || typeof body.repositoryUrl !== "string") {
+    const body: unknown = await request.json();
+    if (!body || typeof body !== "object" || !("repositoryUrl" in body) || typeof body.repositoryUrl !== "string") {
       throw new Error("repositoryUrl must be a non-empty string.");
     }
 
-    // parseRepositoryUrl validates https://github.com/<owner>/<repo> and returns
-    // URL-safe owner/repository segments before any GitHub request is made.
     const { owner, repo } = parseRepositoryUrl(body.repositoryUrl.trim());
-    const encodedOwner = encodeURIComponent(owner);
-    const encodedRepo = encodeURIComponent(repo);
-    const [repoDetails, commits] = await Promise.all([
-      githubFetch<GitHubRepository>(`/repos/${encodedOwner}/${encodedRepo}`, githubToken),
-      githubFetch<GitHubCommit[]>(`/repos/${encodedOwner}/${encodedRepo}/commits?per_page=30`, githubToken),
-    ]);
 
-    if (commits.length === 0) {
-      throw new GitHubApiError("This repository does not contain any commits to analyze.", 422);
+    let repository: GitHubRepository;
+    let commits: GitHubCommit[];
+    let commitDetails: GitHubCommitDetails[];
+    let latestTree: GitHubTree;
+
+    try {
+      [repository, commits] = await Promise.all([
+        githubFetch<GitHubRepository>(`/repos/${owner}/${repo}`, githubToken),
+        githubFetch<GitHubCommit[]>(`/repos/${owner}/${repo}/commits?per_page=30`, githubToken),
+      ]);
+
+      if (commits.length === 0) throw new Error("The repository does not contain any commits.");
+
+      commitDetails = await Promise.all(
+        commits.map((commit) =>
+          githubFetch<GitHubCommitDetails>(`/repos/${owner}/${repo}/commits/${encodeURIComponent(commit.sha)}`, githubToken),
+        ),
+      );
+      latestTree = await githubFetch<GitHubTree>(
+        `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(commitDetails[0].commit.tree.sha)}?recursive=1`,
+        githubToken,
+      );
+    } catch (error) {
+      console.error("GitHub Error:", error);
+      return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
     }
 
-    const commitDetails = await Promise.all(
-      commits.map((commit) =>
-        githubFetch<GitHubCommitDetails>(
-          `/repos/${encodedOwner}/${encodedRepo}/commits/${encodeURIComponent(commit.sha)}`,
-          githubToken,
-        ),
-      ),
-    );
-    const latestTree = await githubFetch<GitHubTree>(
-      `/repos/${encodedOwner}/${encodedRepo}/git/trees/${encodeURIComponent(commitDetails[0].commit.tree.sha)}?recursive=1`,
-      githubToken,
-    );
-    const aiAnalysis = await analyzeCommitMessages(buildCommitContext(commits), geminiApiKey);
+    let aiAnalysis: GeminiAnalysis;
+    try {
+      const commitContext = commits
+        .map((commit) => `${commit.sha.slice(0, 7)} | ${commit.commit.author.date} | ${commit.commit.message.slice(0, 500)}`)
+        .join("\n")
+        .slice(0, 12000);
+      const client = new GoogleGenAI({ apiKey: geminiApiKey });
+      const response = await client.models.generateContent({
+        model: "gemini-1.5-flash",
+        contents: `Recent commit messages:\n${commitContext}`,
+        config: {
+          systemInstruction: "You are a senior software engineer. Assess repository health from these recent commit messages. Return a health score from 0 to 100 and exactly three concise potential security or performance alerts.",
+          responseMimeType: "application/json",
+          responseJsonSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["healthScore", "alerts"],
+            properties: {
+              healthScore: { type: "number", minimum: 0, maximum: 100 },
+              alerts: { type: "array", minItems: 3, maxItems: 3, items: { type: "string" } },
+            },
+          },
+        },
+      });
+
+      if (!response.text) throw new Error("Gemini returned an empty response.");
+      const parsed: unknown = JSON.parse(response.text);
+      if (!isGeminiAnalysis(parsed)) throw new Error("Gemini returned an invalid JSON response.");
+      aiAnalysis = {
+        healthScore: Math.max(0, Math.min(100, Math.round(parsed.healthScore))),
+        alerts: parsed.alerts.slice(0, 3),
+      };
+    } catch (error) {
+      console.error("Gemini Error:", error);
+      return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
+    }
 
     return NextResponse.json({
       repoDetails: {
-        name: repoDetails.name,
-        fullName: repoDetails.full_name,
-        description: repoDetails.description,
-        url: repoDetails.html_url,
-        defaultBranch: repoDetails.default_branch,
-        openIssues: repoDetails.open_issues_count,
-        stars: repoDetails.stargazers_count,
-        forks: repoDetails.forks_count,
-        updatedAt: repoDetails.updated_at,
+        name: repository.name,
+        fullName: repository.full_name,
+        description: repository.description,
+        url: repository.html_url,
+        defaultBranch: repository.default_branch,
+        openIssues: repository.open_issues_count,
+        stars: repository.stargazers_count,
+        forks: repository.forks_count,
+        updatedAt: repository.updated_at,
       },
       commits: commitDetails.map((commit) => ({
         sha: commit.sha,
@@ -249,9 +212,6 @@ export async function POST(request: Request) {
     });
   } catch (error) {
     console.error("API Route Error:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unknown error occurred" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
   }
 }
