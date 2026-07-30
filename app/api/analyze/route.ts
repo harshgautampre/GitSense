@@ -137,7 +137,7 @@ function isGeminiAnalysis(value: unknown): value is GeminiAnalysis {
 async function analyzeCommitMessages(commitContext: string, apiKey: string): Promise<GeminiAnalysis> {
   const client = new GoogleGenAI({ apiKey });
   const response = await client.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-1.5-flash",
     contents: `Recent commit messages:\n${commitContext}`,
     config: {
       systemInstruction: "You are a senior software engineer reviewing repository health from recent commit messages. Estimate a repository health score from 0 to 100 and identify exactly three concise, credible potential security or performance alerts. Do not claim certainty where commit messages lack evidence.",
