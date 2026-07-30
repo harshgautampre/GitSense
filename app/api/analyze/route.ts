@@ -146,7 +146,7 @@ export async function POST(request: Request) {
         .slice(0, 12000);
       const client = new GoogleGenAI({ apiKey: geminiApiKey });
       const response = await client.models.generateContent({
-        model: "gemini-1.5-flash",
+        model: "gemini-2.5-flash",
         contents: `Recent commit messages:\n${commitContext}`,
         config: {
           systemInstruction: "You are a senior software engineer. Assess repository health from these recent commit messages. Return a health score from 0 to 100 and exactly three concise potential security or performance alerts.",
