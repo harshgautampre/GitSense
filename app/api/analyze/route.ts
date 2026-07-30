@@ -172,28 +172,20 @@ async function analyzeCommitMessages(commitContext: string, apiKey: string): Pro
 }
 
 export async function POST(request: Request) {
-  const githubToken = process.env.GITHUB_TOKEN;
-  const geminiApiKey = process.env.GEMINI_API_KEY;
-
-  if (!githubToken || !geminiApiKey) {
-    return NextResponse.json(
-      { error: "The server requires GITHUB_TOKEN and GEMINI_API_KEY configuration." },
-      { status: 500 },
-    );
-  }
-
-  let body: AnalyzeRepositoryRequest;
   try {
-    body = (await request.json()) as AnalyzeRepositoryRequest;
-  } catch {
-    return NextResponse.json({ error: "Provide a JSON body containing repositoryUrl." }, { status: 400 });
-  }
+    const githubToken = process.env.GITHUB_TOKEN;
+    const geminiApiKey = process.env.GEMINI_API_KEY;
+    if (!githubToken || !geminiApiKey) {
+      throw new Error("The server requires GITHUB_TOKEN and GEMINI_API_KEY configuration.");
+    }
 
-  if (!body.repositoryUrl || typeof body.repositoryUrl !== "string") {
-    return NextResponse.json({ error: "repositoryUrl must be a non-empty string." }, { status: 400 });
-  }
+    const body = (await request.json()) as AnalyzeRepositoryRequest;
+    if (!body.repositoryUrl || typeof body.repositoryUrl !== "string") {
+      throw new Error("repositoryUrl must be a non-empty string.");
+    }
 
-  try {
+    // parseRepositoryUrl validates https://github.com/<owner>/<repo> and returns
+    // URL-safe owner/repository segments before any GitHub request is made.
     const { owner, repo } = parseRepositoryUrl(body.repositoryUrl.trim());
     const encodedOwner = encodeURIComponent(owner);
     const encodedRepo = encodeURIComponent(repo);
@@ -256,14 +248,10 @@ export async function POST(request: Request) {
       treeTruncated: latestTree.truncated,
     });
   } catch (error) {
-    if (error instanceof GitHubApiError) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
-    }
-
-    console.error("Repository analysis failed:", error);
+    console.error("API Route Error:", error);
     return NextResponse.json(
-      { error: "Repository analysis failed. Verify your credentials and try again." },
-      { status: 502 },
+      { error: error instanceof Error ? error.message : "Unknown error occurred" },
+      { status: 500 },
     );
   }
 }
