@@ -405,6 +405,22 @@ function createView(
   };
 }
 
+function isRepositoryAnalysisResponse(
+  value: unknown,
+): value is RepositoryAnalysisResponse {
+  if (!value || typeof value !== "object") return false;
+
+  const analysis = value as Record<string, unknown>;
+  return (
+    typeof analysis.repoDetails === "object" &&
+    analysis.repoDetails !== null &&
+    Array.isArray(analysis.commits) &&
+    Array.isArray(analysis.latestFiles) &&
+    typeof analysis.aiHealthScore === "number" &&
+    Array.isArray(analysis.aiAlerts)
+  );
+}
+
 function RepositoryPanel({ data }: { data: RepositoryDashboardData }) {
   return (
     <aside className="hidden w-[310px] shrink-0 rounded-3xl border border-white/10 bg-slate-950/55 p-5 shadow-2xl backdrop-blur-2xl 2xl:block">
@@ -482,10 +498,10 @@ export function RepositoryDashboard({
             : `API request failed with status ${response.status}.`;
         throw new Error(apiError);
       }
-      if (!result || typeof result !== "object") {
+      if (!isRepositoryAnalysisResponse(result)) {
         throw new Error("The API returned an invalid analysis response.");
       }
-      setAnalysis(result as RepositoryAnalysisResponse);
+      setAnalysis(result);
     } catch (reason) {
       setError(
         reason instanceof Error
@@ -631,7 +647,7 @@ export function RepositoryDashboard({
               />
             )}
           </div>
-          <section className="mt-5 grid gap-5 xl:grid-cols-[1.05fr_.85fr_1.1fr]">
+          <section className="mt-5 grid gap-5">
             <article className="rounded-2xl border border-white/10 bg-slate-950/35 p-5 backdrop-blur-xl">
               <div className="flex justify-between">
                 <h2 className="text-base font-semibold">
