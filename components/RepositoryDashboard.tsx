@@ -365,16 +365,54 @@ function createView(analysis: RepositoryAnalysisResponse): {
   };
 }
 
-function getCommitWhy(commit: RepositoryAnalysisResponse["commits"][number]) {
+type Commit = RepositoryAnalysisResponse["commits"][number];
+
+function getCommitBreakdown(commit: Commit) {
   const subject = commit.message.split("\n")[0].replace(/[.?!]+$/, "").trim();
-  const fileCount = commit.files.length;
-  const fileContext = fileCount
-    ? ` It changes ${fileCount} file${fileCount === 1 ? "" : "s"}${commit.files[0] ? `, including ${commit.files[0].path}` : ""}.`
-    : " GitHub did not return modified-file details for this commit.";
-  const reason = subject
-    ? subject.charAt(0).toLowerCase() + subject.slice(1)
-    : "advance the repository work";
-  return `This change was probably made to ${reason}.${fileContext}`;
+  const files = commit.files;
+  const additions = files.reduce((total, file) => total + file.additions, 0);
+  const deletions = files.reduce((total, file) => total + file.deletions, 0);
+  const evidence = `${additions.toLocaleString()} additions and ${deletions.toLocaleString()} deletions across ${files.length} modified file${files.length === 1 ? "" : "s"}.`;
+  const fileList = files.slice(0, 5).map((file) => `${file.status}: ${file.path}`);
+  const signals = `${subject} ${files.map((file) => file.path).join(" ")}`.toLowerCase();
+  const intent = signals.includes("refactor") || signals.includes("cleanup") || signals.includes("rename")
+    ? "The naming and file pattern suggests a refactor intended to improve maintainability without necessarily changing product behavior."
+    : signals.includes("fix") || signals.includes("bug") || signals.includes("regression") || signals.includes("error")
+      ? "The commit wording and touched files suggest a bug-fix pass focused on correcting existing behavior or preventing a regression."
+      : signals.includes("test") || signals.includes("spec")
+        ? "The changed test-related files suggest the author is validating behavior, protecting against a regression, or documenting an expected edge case."
+        : signals.includes("auth") || signals.includes("security") || signals.includes("token") || signals.includes("permission")
+          ? "The affected security-related paths suggest the change is intended to tighten access control, validation, or credential handling."
+          : "The commit message and changed-file pattern suggest an incremental feature or maintenance change; the exact rationale requires the raw diff hunk content.";
+
+  return {
+    subject: subject || "Untitled commit",
+    evidence,
+    intent,
+    fileList,
+    hasMoreFiles: files.length > fileList.length,
+  };
+}
+
+function CommitBreakdown({ commit, compact = false }: { commit: Commit; compact?: boolean }) {
+  const breakdown = getCommitBreakdown(commit);
+  return (
+    <div className={compact ? "space-y-2" : "space-y-3"}>
+      <p className="text-sm leading-6 text-slate-300">{breakdown.intent}</p>
+      <p className="text-xs leading-5 text-cyan-100">{breakdown.evidence}</p>
+      {!compact && (
+        <div>
+          <p className="mb-2 text-xs font-semibold tracking-wider text-slate-400 uppercase">Changed files</p>
+          <ul className="space-y-1.5">
+            {breakdown.fileList.map((file) => (
+              <li key={file} className="truncate font-mono text-xs text-slate-300">{file}</li>
+            ))}
+            {breakdown.hasMoreFiles && <li className="text-xs text-slate-500">Additional files are listed below.</li>}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function EmptyAnalysisState({ children }: { children: ReactNode }) {
@@ -577,7 +615,7 @@ export function RepositoryDashboard({
                 {analysis.commits.slice(0, 2).map((commit) => (
                   <article key={commit.sha} className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
                     <p className="truncate text-sm font-medium">{commit.message}</p>
-                    <p className="mt-2 text-sm leading-6 text-slate-300">{getCommitWhy(commit)}</p>
+                    <div className="mt-2"><CommitBreakdown commit={commit} compact /></div>
                     <p className="mt-3 font-mono text-[11px] text-cyan-200">{commit.sha.slice(0, 7)}</p>
                   </article>
                 ))}
@@ -810,8 +848,8 @@ export function RepositoryDashboard({
                   {expandedCommit === commit.sha && (
                     <div className="mt-4 border-t border-white/10 pt-4">
                       <section className="mb-4 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.045] p-3">
-                        <p className="text-xs font-semibold tracking-wider text-cyan-100 uppercase">Probable why</p>
-                        <p className="mt-2 text-sm leading-6 text-slate-300">{getCommitWhy(commit)}</p>
+                        <p className="text-xs font-semibold tracking-wider text-cyan-100 uppercase">Detailed change breakdown</p>
+                        <div className="mt-2"><CommitBreakdown commit={commit} /></div>
                       </section>
                       <p className="mb-3 text-xs font-semibold tracking-wider text-slate-400 uppercase">
                         Modified files
