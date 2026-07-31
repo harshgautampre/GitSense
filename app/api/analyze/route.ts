@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
@@ -21,12 +21,8 @@ interface GitHubCommit {
   commit: {
     message: string;
     author: { name: string; date: string };
-    tree?: { sha: string };
+    tree: { sha: string };
   };
-}
-
-interface GitHubCommitDetails extends GitHubCommit {
-  commit: GitHubCommit["commit"] & { tree: { sha: string } };
   stats: { additions: number; deletions: number; total: number };
   files: Array<{
     filename: string;
@@ -47,17 +43,17 @@ interface GeminiAnalysis {
   alerts: string[];
 }
 
-function getErrorMessage(error: unknown) {
+function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error occurred";
 }
 
 function parseRepositoryUrl(repositoryUrl: string) {
-  const parsed = new URL(repositoryUrl);
-  if (parsed.protocol !== "https:" || !["github.com", "www.github.com"].includes(parsed.hostname)) {
+  const url = new URL(repositoryUrl);
+  if (url.protocol !== "https:" || !["github.com", "www.github.com"].includes(url.hostname)) {
     throw new Error("repositoryUrl must be a GitHub HTTPS URL.");
   }
 
-  const segments = parsed.pathname.split("/").filter(Boolean);
+  const segments = url.pathname.split("/").filter(Boolean);
   if (segments.length !== 2) {
     throw new Error("Use a repository URL in the form https://github.com/owner/repository.");
   }
@@ -69,12 +65,11 @@ function parseRepositoryUrl(repositoryUrl: string) {
   return { owner: encodeURIComponent(owner), repo: encodeURIComponent(repo) };
 }
 
-async function githubFetch<T>(path: string, token: string): Promise<T> {
+async function githubFetch<T>(path: string): Promise<T> {
   const response = await fetch(`https://api.github.com${path}`, {
     headers: {
+      Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
       Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
     },
     cache: "no-store",
   });
@@ -98,12 +93,14 @@ function isGeminiAnalysis(value: unknown): value is GeminiAnalysis {
 }
 
 export async function POST(request: Request) {
-  try {
-    const githubToken = process.env.GITHUB_TOKEN;
-    const geminiApiKey = process.env.GEMINI_API_KEY;
-    if (!githubToken) throw new Error("GITHUB_TOKEN is not configured.");
-    if (!geminiApiKey) throw new Error("GEMINI_API_KEY is not configured.");
+  if (!process.env.GITHUB_TOKEN || !process.env.GEMINI_API_KEY) {
+    return NextResponse.json(
+      { error: "Missing GITHUB_TOKEN or GEMINI_API_KEY environment variables" },
+      { status: 400 },
+    );
+  }
 
+  try {
     const body: unknown = await request.json();
     if (!body || typeof body !== "object" || !("repositoryUrl" in body) || typeof body.repositoryUrl !== "string") {
       throw new Error("repositoryUrl must be a non-empty string.");
@@ -111,69 +108,37 @@ export async function POST(request: Request) {
 
     const { owner, repo } = parseRepositoryUrl(body.repositoryUrl.trim());
 
-    let repository: GitHubRepository;
-    let commits: GitHubCommit[];
-    let commitDetails: GitHubCommitDetails[];
-    let latestTree: GitHubTree;
+    const [repository, commitList] = await Promise.all([
+      githubFetch<GitHubRepository>(`/repos/${owner}/${repo}`),
+      githubFetch<GitHubCommit[]>(`/repos/${owner}/${repo}/commits?per_page=30`),
+    ]);
 
-    try {
-      [repository, commits] = await Promise.all([
-        githubFetch<GitHubRepository>(`/repos/${owner}/${repo}`, githubToken),
-        githubFetch<GitHubCommit[]>(`/repos/${owner}/${repo}/commits?per_page=30`, githubToken),
-      ]);
+    if (commitList.length === 0) throw new Error("The repository does not contain any commits.");
 
-      if (commits.length === 0) throw new Error("The repository does not contain any commits.");
+    const commits = await Promise.all(
+      commitList.map((commit) => githubFetch<GitHubCommit>(`/repos/${owner}/${repo}/commits/${encodeURIComponent(commit.sha)}`)),
+    );
+    const latestTree = await githubFetch<GitHubTree>(
+      `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(commits[0].commit.tree.sha)}?recursive=1`,
+    );
 
-      commitDetails = await Promise.all(
-        commits.map((commit) =>
-          githubFetch<GitHubCommitDetails>(`/repos/${owner}/${repo}/commits/${encodeURIComponent(commit.sha)}`, githubToken),
-        ),
-      );
-      latestTree = await githubFetch<GitHubTree>(
-        `/repos/${owner}/${repo}/git/trees/${encodeURIComponent(commitDetails[0].commit.tree.sha)}?recursive=1`,
-        githubToken,
-      );
-    } catch (error) {
-      console.error("GitHub Error:", error);
-      return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
-    }
-
-    let aiAnalysis: GeminiAnalysis;
-    try {
-      const commitContext = commits
-        .map((commit) => `${commit.sha.slice(0, 7)} | ${commit.commit.author.date} | ${commit.commit.message.slice(0, 500)}`)
-        .join("\n")
-        .slice(0, 12000);
-      const client = new GoogleGenAI({ apiKey: geminiApiKey });
-      const response = await client.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: `Recent commit messages:\n${commitContext}`,
-        config: {
-          systemInstruction: "You are a senior software engineer. Assess repository health from these recent commit messages. Return a health score from 0 to 100 and exactly three concise potential security or performance alerts.",
-          responseMimeType: "application/json",
-          responseJsonSchema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["healthScore", "alerts"],
-            properties: {
-              healthScore: { type: "number", minimum: 0, maximum: 100 },
-              alerts: { type: "array", minItems: 3, maxItems: 3, items: { type: "string" } },
-            },
-          },
-        },
-      });
-
-      if (!response.text) throw new Error("Gemini returned an empty response.");
-      const parsed: unknown = JSON.parse(response.text);
-      if (!isGeminiAnalysis(parsed)) throw new Error("Gemini returned an invalid JSON response.");
-      aiAnalysis = {
-        healthScore: Math.max(0, Math.min(100, Math.round(parsed.healthScore))),
-        alerts: parsed.alerts.slice(0, 3),
-      };
-    } catch (error) {
-      console.error("Gemini Error:", error);
-      return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
-    }
+    // This model is confirmed by the configured API key's live model list.
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({
+      model: "gemini-2.0-flash",
+      systemInstruction: "You are a senior software engineer. Assess repository health from recent commit messages. Return JSON with a healthScore from 0 to 100 and exactly three concise potential security or performance alerts.",
+      generationConfig: { responseMimeType: "application/json" },
+    });
+    const commitContext = commitList
+      .map((commit) => `${commit.sha.slice(0, 7)} | ${commit.commit.author.date} | ${commit.commit.message.slice(0, 500)}`)
+      .join("\n")
+      .slice(0, 12000);
+    const geminiResult = await model.generateContent(
+      `Return only JSON in this shape: {"healthScore": number, "alerts": [string, string, string]}.\n\nRecent commit messages:\n${commitContext}`,
+    );
+    const geminiText = geminiResult.response.text();
+    const parsedGemini: unknown = JSON.parse(geminiText);
+    if (!isGeminiAnalysis(parsedGemini)) throw new Error("Gemini returned an invalid JSON response.");
 
     return NextResponse.json({
       repoDetails: {
@@ -187,7 +152,7 @@ export async function POST(request: Request) {
         forks: repository.forks_count,
         updatedAt: repository.updated_at,
       },
-      commits: commitDetails.map((commit) => ({
+      commits: commits.map((commit) => ({
         sha: commit.sha,
         message: commit.commit.message,
         author: commit.commit.author.name,
@@ -206,12 +171,12 @@ export async function POST(request: Request) {
       latestFiles: latestTree.tree
         .filter((entry) => entry.type === "blob")
         .map((entry) => ({ path: entry.path, sha: entry.sha, size: entry.size ?? null })),
-      aiHealthScore: aiAnalysis.healthScore,
-      aiAlerts: aiAnalysis.alerts,
+      aiHealthScore: Math.max(0, Math.min(100, Math.round(parsedGemini.healthScore))),
+      aiAlerts: parsedGemini.alerts.slice(0, 3),
       treeTruncated: latestTree.truncated,
     });
   } catch (error) {
     console.error("API Route Error:", error);
-    return NextResponse.json({ error: getErrorMessage(error) }, { status: 500 });
+    return NextResponse.json({ error: errorMessage(error) }, { status: 500 });
   }
 }
