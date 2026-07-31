@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  useEffect,
   useState,
   type KeyboardEvent,
   type MouseEvent,
@@ -12,7 +11,9 @@ import type {
   DashboardIcon,
   Metric,
   RepositoryAnalysisResponse,
+  RepositoryChart,
   RepositoryDashboardData,
+  SecurityAlert,
 } from "@/lib/dashboard-data";
 
 type ModalKind = "graph" | "alerts" | "commits";
@@ -61,40 +62,10 @@ const iconPaths: Record<DashboardIcon, ReactNode> = {
       <path d="m9 12 2 2 4-4" />
     </>
   ),
-  settings: (
-    <>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M5 12h2m10 0h2M12 5v2m0 10v2" />
-    </>
-  ),
-  bell: (
-    <>
-      <path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
-      <path d="M10 21h4" />
-    </>
-  ),
-  search: (
-    <>
-      <circle cx="11" cy="11" r="6" />
-      <path d="m20 20-4.2-4.2" />
-    </>
-  ),
   plus: (
     <>
       <path d="M12 5v14" />
       <path d="M5 12h14" />
-    </>
-  ),
-  "arrow-up": (
-    <>
-      <path d="m6 10 6-6 6 6" />
-      <path d="M12 4v16" />
-    </>
-  ),
-  "arrow-down": (
-    <>
-      <path d="m18 14-6 6-6-6" />
-      <path d="M12 20V4" />
     </>
   ),
 };
@@ -119,42 +90,6 @@ function Icon({
     >
       {iconPaths[icon]}
     </svg>
-  );
-}
-
-export function FeatureHighlightBar({
-  prefix,
-  features,
-}: {
-  prefix: string;
-  features: string[];
-}) {
-  const [index, setIndex] = useState(0);
-  const [fading, setFading] = useState(false);
-  useEffect(() => {
-    let timeout: number | undefined;
-    const interval = window.setInterval(() => {
-      setFading(true);
-      timeout = window.setTimeout(() => {
-        setIndex((current) => (current + 1) % features.length);
-        setFading(false);
-      }, 250);
-    }, 7000);
-    return () => {
-      window.clearInterval(interval);
-      if (timeout) window.clearTimeout(timeout);
-    };
-  }, [features.length]);
-  return (
-    <div className="flex min-w-0 items-center gap-2 rounded-full border border-white/10 bg-white/[0.045] px-3 py-1.5 text-xs text-slate-300">
-      <span className="size-1.5 rounded-full bg-cyan-300 shadow-[0_0_10px_rgba(103,232,249,.8)]" />
-      <span className="font-medium text-white">{prefix}</span>
-      <span
-        className={`truncate transition-all duration-300 ${fading ? "translate-y-1 opacity-0" : "opacity-100"}`}
-      >
-        {features[index]}
-      </span>
-    </div>
   );
 }
 
@@ -198,7 +133,7 @@ function CommitActivityChart({
   expanded = false,
   onOpen,
 }: {
-  data: RepositoryDashboardData["chart"];
+  data: RepositoryChart;
   expanded?: boolean;
   onOpen?: (event: MouseEvent<HTMLElement>) => void;
 }) {
@@ -348,12 +283,11 @@ function AnalysisSkeleton() {
   );
 }
 
-function createView(
-  data: RepositoryDashboardData,
-  analysis: RepositoryAnalysisResponse | null,
-) {
-  if (!analysis)
-    return { metrics: data.metrics, chart: data.chart, alerts: data.alerts };
+function createView(analysis: RepositoryAnalysisResponse): {
+  metrics: Metric[];
+  chart: RepositoryChart;
+  alerts: SecurityAlert[];
+} {
   const normalize = (values: number[]) => {
     const max = Math.max(...values, 1);
     return values.map((value) => Math.round((value / max) * 100));
@@ -365,20 +299,34 @@ function createView(
   const max = Math.max(...additions, ...deletions, ...total);
   return {
     metrics: [
-      { ...data.metrics[0], value: commits.length.toString() },
       {
-        ...data.metrics[1],
-        label: "Health Score",
-        value: `${analysis.aiHealthScore}/100`,
+        label: "Commits Analyzed",
+        value: commits.length.toString(),
+        change: "Latest commits returned by GitHub",
+        trend: "up",
+        icon: "commit",
+        accent: "from-violet-500 to-fuchsia-500",
       },
       {
-        ...data.metrics[2],
         label: "Open Issues",
         value: analysis.repoDetails.openIssues.toString(),
+        change: "Current GitHub repository total",
+        trend: "up",
+        icon: "shield",
+        accent: "from-orange-400 to-rose-500",
+      },
+      {
+        label: "Stars",
+        value: analysis.repoDetails.stars.toLocaleString(),
+        change: "Current GitHub repository total",
+        trend: "up",
+        icon: "repository",
+        accent: "from-cyan-400 to-blue-500",
       },
     ],
     chart: {
-      ...data.chart,
+      title: "Commit Activity",
+      period: `${commits.length} latest commits returned by GitHub`,
       xAxisLabels: commits.map((commit) =>
         new Intl.DateTimeFormat("en", {
           month: "short",
@@ -392,17 +340,45 @@ function createView(
         "0",
       ],
       series: [
-        { ...data.chart.series[0], values: normalize(additions) },
-        { ...data.chart.series[1], values: normalize(deletions) },
-        { ...data.chart.series[2], values: normalize(total) },
+        { name: "Code Additions", color: "#39d9b2", values: normalize(additions) },
+        { name: "Code Deletions", color: "#fb7185", values: normalize(deletions) },
+        { name: "Total Commits", color: "#67b7ff", values: normalize(total) },
       ],
     },
-    alerts: analysis.aiAlerts.map((title, index) => ({
-      ...data.alerts[index % data.alerts.length],
-      id: `${index}-${title}`,
-      title,
-    })),
+    alerts: analysis.aiAlerts.map((title, index) => {
+      const normalizedTitle = title.toLowerCase();
+      const severity = normalizedTitle.includes("critical") || normalizedTitle.includes("security") || normalizedTitle.includes("vulnerab")
+        ? "critical"
+        : normalizedTitle.includes("performance") || normalizedTitle.includes("slow") || normalizedTitle.includes("risk")
+          ? "warning"
+          : "info";
+      return {
+        id: `${index}-${title}`,
+        title,
+        category: "AI repository finding",
+        timestamp: "Current analysis",
+        severity,
+        icon: severity === "critical" ? "!" : severity === "warning" ? "↗" : "i",
+        iconBackground: severity === "critical" ? "bg-rose-500/20 text-rose-200" : severity === "warning" ? "bg-amber-400/20 text-amber-100" : "bg-sky-400/20 text-sky-100",
+      };
+    }),
   };
+}
+
+function getCommitWhy(commit: RepositoryAnalysisResponse["commits"][number]) {
+  const subject = commit.message.split("\n")[0].replace(/[.?!]+$/, "").trim();
+  const fileCount = commit.files.length;
+  const fileContext = fileCount
+    ? ` It changes ${fileCount} file${fileCount === 1 ? "" : "s"}${commit.files[0] ? `, including ${commit.files[0].path}` : ""}.`
+    : " GitHub did not return modified-file details for this commit.";
+  const reason = subject
+    ? subject.charAt(0).toLowerCase() + subject.slice(1)
+    : "advance the repository work";
+  return `This change was probably made to ${reason}.${fileContext}`;
+}
+
+function EmptyAnalysisState({ children }: { children: ReactNode }) {
+  return <p className="rounded-2xl border border-dashed border-white/10 bg-slate-950/25 px-5 py-8 text-sm text-slate-400">{children}</p>;
 }
 
 function isRepositoryAnalysisResponse(
@@ -421,34 +397,33 @@ function isRepositoryAnalysisResponse(
   );
 }
 
-function RepositoryPanel({ data }: { data: RepositoryDashboardData }) {
+function RepositoryPanel({ analysis }: { analysis: RepositoryAnalysisResponse | null }) {
+  if (!analysis) return null;
+
+  const { repoDetails } = analysis;
   return (
     <aside className="hidden w-[310px] shrink-0 rounded-3xl border border-white/10 bg-slate-950/55 p-5 shadow-2xl backdrop-blur-2xl 2xl:block">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-400">{data.repository.label}</p>
+        <p className="text-sm text-slate-400">Active repository</p>
         <span className="grid size-9 place-items-center rounded-xl bg-white/10 text-cyan-200">
           <Icon icon="repository" className="size-4" />
         </span>
       </div>
-      <p className="mt-2 text-xl font-semibold">{data.repository.name}</p>
+      <p className="mt-2 text-xl font-semibold">{repoDetails.fullName}</p>
       <p className="mt-1 text-xs text-slate-500">
-        {data.repository.description}
+        {repoDetails.description ?? "No repository description provided."}
       </p>
       <div className="mt-7 rounded-2xl border border-white/10 bg-white/[0.045] p-4">
         <div className="flex justify-between">
-          <span className="text-xs text-slate-500">
-            {data.repository.defaultBranchLabel}
-          </span>
+          <span className="text-xs text-slate-500">Default branch</span>
           <span className="font-mono text-xs text-cyan-200">
-            {data.repository.defaultBranch}
+            {repoDetails.defaultBranch}
           </span>
         </div>
         <div className="mt-4 flex justify-between">
-          <span className="text-xs text-slate-500">
-            {data.repository.lastScanLabel}
-          </span>
+          <span className="text-xs text-slate-500">Last updated</span>
           <span className="text-xs text-slate-300">
-            {data.repository.lastScan}
+            {new Date(repoDetails.updatedAt).toLocaleString()}
           </span>
         </div>
       </div>
@@ -461,7 +436,7 @@ export function RepositoryDashboard({
 }: {
   data: RepositoryDashboardData;
 }) {
-  const [repositoryUrl, setRepositoryUrl] = useState(data.repository.url);
+  const [repositoryUrl, setRepositoryUrl] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [analysis, setAnalysis] = useState<RepositoryAnalysisResponse | null>(
     null,
@@ -470,7 +445,7 @@ export function RepositoryDashboard({
   const [modal, setModal] = useState<ModalKind | null>(null);
   const [origin, setOrigin] = useState<ModalOrigin>({ x: 0, y: 0 });
   const [expandedCommit, setExpandedCommit] = useState<string | null>(null);
-  const view = createView(data, analysis);
+  const view = analysis ? createView(analysis) : null;
 
   const openModal = (kind: ModalKind, event: MouseEvent<HTMLElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
@@ -519,6 +494,7 @@ export function RepositoryDashboard({
     if (id === "activity") openModal("graph", event);
     if (id === "commits") openModal("commits", event);
     if (id === "alerts") openModal("alerts", event);
+    if (id === "overview") window.scrollTo({ top: 0, behavior: "smooth" });
   };
   const realCommits = analysis?.commits ?? [];
 
@@ -557,16 +533,6 @@ export function RepositoryDashboard({
               {data.copy.brand}
             </h1>
             <div className="absolute right-0 top-0 flex items-center gap-3">
-              {data.actionIcons.map((action) => (
-                <button
-                  key={action.label}
-                  type="button"
-                  aria-label={action.label}
-                  className="grid size-10 place-items-center rounded-xl border border-white/10 bg-white/5 text-slate-300"
-                >
-                  <Icon icon={action.icon} className="size-4" />
-                </button>
-              ))}
               <div className="hidden text-right sm:block">
                 <p className="text-sm font-medium">{data.profile.name}</p>
                 <p className="text-xs text-slate-500">{data.profile.role}</p>
@@ -604,12 +570,20 @@ export function RepositoryDashboard({
               </button>
             </div>
           </div>
-          <div className="mt-6">
-            <FeatureHighlightBar
-              prefix={data.copy.featurePrefix}
-              features={data.features}
-            />
-          </div>
+          {analysis && (
+            <section className="mb-7 rounded-2xl border border-cyan-300/15 bg-cyan-300/[0.045] p-5">
+              <h2 className="text-base font-semibold">{data.copy.latestWhyLabel}</h2>
+              <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                {analysis.commits.slice(0, 2).map((commit) => (
+                  <article key={commit.sha} className="rounded-xl border border-white/10 bg-slate-950/40 p-4">
+                    <p className="truncate text-sm font-medium">{commit.message}</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-300">{getCommitWhy(commit)}</p>
+                    <p className="mt-3 font-mono text-[11px] text-cyan-200">{commit.sha.slice(0, 7)}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
           {error && (
             <p
               role="alert"
@@ -619,32 +593,33 @@ export function RepositoryDashboard({
             </p>
           )}
           <section className="mt-7">
-            <div className="mb-4 flex justify-between">
+            <div className="mb-4">
               <h2 className="text-base font-semibold">
                 {data.copy.statsLabel}
               </h2>
-              <button type="button" className="text-xs text-violet-300">
-                {data.copy.seeInsightsLabel}
-              </button>
             </div>
             {isLoading ? (
               <AnalysisSkeleton />
-            ) : (
+            ) : view ? (
               <div className="grid gap-4 md:grid-cols-3">
                 {view.metrics.map((metric) => (
                   <MetricCard key={metric.label} metric={metric} />
                 ))}
               </div>
+            ) : (
+              <EmptyAnalysisState>Analyze a repository to load live GitHub statistics.</EmptyAnalysisState>
             )}
           </section>
           <div className="mt-5">
             {isLoading ? (
               <div className="h-[354px] animate-pulse rounded-2xl border border-white/10 bg-white/[0.04]" />
-            ) : (
+            ) : view ? (
               <CommitActivityChart
                 data={view.chart}
                 onOpen={(event) => openModal("graph", event)}
               />
+            ) : (
+              <EmptyAnalysisState>Commit activity will appear after a repository analysis completes.</EmptyAnalysisState>
             )}
           </div>
           <section className="mt-5 grid gap-5">
@@ -662,6 +637,7 @@ export function RepositoryDashboard({
                 </button>
               </div>
               <div className="mt-3 divide-y divide-white/8">
+                {!analysis && <p className="py-3 text-sm text-slate-400">Analyze a repository to load its commit history.</p>}
                 {(analysis
                   ? realCommits
                       .slice(0, 3)
@@ -670,10 +646,9 @@ export function RepositoryDashboard({
                         message: commit.message,
                         author: commit.author,
                         timestamp: new Date(commit.date).toLocaleString(),
-                        branch: data.repository.defaultBranch,
                         accent: "bg-cyan-400",
                       }))
-                  : data.commits
+                  : []
                 ).map((commit) => (
                   <div
                     key={commit.hash}
@@ -699,21 +674,17 @@ export function RepositoryDashboard({
               <h2 className="text-base font-semibold">
                 {data.copy.healthLabel}
               </h2>
-              <p className="mt-7 text-3xl font-semibold">
-                {analysis ? `${analysis.aiHealthScore}/100` : data.health.value}
-              </p>
-              <p className="mt-2 text-sm leading-6 text-slate-300">
-                {data.health.detail}
-              </p>
-              <div className="mt-6 h-2 rounded-full bg-white/10">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-cyan-300 to-violet-400"
-                  style={{
-                    width: `${analysis?.aiHealthScore ?? data.health.progress}%`,
-                  }}
-                />
-              </div>
-              <p className="mt-2 text-xs text-cyan-100">{data.health.label}</p>
+              {analysis ? (
+                <>
+                  <p className="mt-7 text-3xl font-semibold">{analysis.aiHealthScore}/100</p>
+                  <p className="mt-2 text-sm leading-6 text-slate-300">Calculated from the AI analysis of the latest returned commit messages.</p>
+                  <div className="mt-6 h-2 rounded-full bg-white/10">
+                    <div className="h-full rounded-full bg-gradient-to-r from-cyan-300 to-violet-400" style={{ width: `${analysis.aiHealthScore}%` }} />
+                  </div>
+                </>
+              ) : (
+                <p className="mt-4 text-sm text-slate-400">Analyze a repository to calculate its health score.</p>
+              )}
             </article>
             <article className="rounded-2xl border border-white/10 bg-slate-950/35 p-5 backdrop-blur-xl">
               <div className="flex justify-between">
@@ -729,7 +700,8 @@ export function RepositoryDashboard({
                 </button>
               </div>
               <div className="mt-3 divide-y divide-white/8">
-                {view.alerts.map((alert) => (
+                {!analysis && <p className="py-3 text-sm text-slate-400">Analyze a repository to view AI-generated alerts.</p>}
+                {(view?.alerts ?? []).map((alert) => (
                   <div key={alert.id} className="flex items-center gap-3 py-3">
                     <span
                       className={`grid size-9 place-items-center rounded-xl ${alert.iconBackground}`}
@@ -755,9 +727,9 @@ export function RepositoryDashboard({
             </article>
           </section>
         </section>
-          <RepositoryPanel data={data} />
+          <RepositoryPanel analysis={analysis} />
       </div>
-      {modal === "graph" && (
+      {modal === "graph" && view && (
         <Modal
           title={view.chart.title}
           origin={origin}
@@ -774,7 +746,7 @@ export function RepositoryDashboard({
         >
           {analysis ? (
             <div className="space-y-4">
-              {view.alerts.map((alert) => (
+              {(view?.alerts ?? []).map((alert) => (
                 <article
                   key={alert.id}
                   className="rounded-2xl border border-white/10 bg-white/[0.045] p-5"
@@ -809,7 +781,7 @@ export function RepositoryDashboard({
           onClose={() => setModal(null)}
         >
           {realCommits.length ? (
-            <div className="space-y-3">
+            <div className="max-h-[calc(100vh-12rem)] space-y-3 overflow-y-auto overscroll-contain pr-2">
               {realCommits.map((commit) => (
                 <article
                   key={commit.sha}
@@ -837,6 +809,10 @@ export function RepositoryDashboard({
                   </button>
                   {expandedCommit === commit.sha && (
                     <div className="mt-4 border-t border-white/10 pt-4">
+                      <section className="mb-4 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.045] p-3">
+                        <p className="text-xs font-semibold tracking-wider text-cyan-100 uppercase">Probable why</p>
+                        <p className="mt-2 text-sm leading-6 text-slate-300">{getCommitWhy(commit)}</p>
+                      </section>
                       <p className="mb-3 text-xs font-semibold tracking-wider text-slate-400 uppercase">
                         Modified files
                       </p>
